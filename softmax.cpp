@@ -136,6 +136,23 @@ int get_eval_gap(int pos_eval, int child_move_eval) {
   return -child_move_eval - pos_eval;
 }
 
+// for chess960 uci::uciToMove only accepts KxR castling notation
+Move cdbuci_to_move(const Board &board, std::string_view uci) {
+  if (board.chess960() &&
+      (uci == "e1g1" || uci == "e1c1" || uci == "e8g8" || uci == "e8c8")) {
+    auto source = Square(uci.substr(0, 2));
+    auto target = Square(uci.substr(2, 2));
+    auto pt = board.at(source).type();
+
+    if (pt == PieceType::KING && board.at(target).type() == PieceType::NONE) {
+      target =
+          Square(target > source ? File::FILE_H : File::FILE_A, source.rank());
+      return Move::make<Move::CASTLING>(source, target);
+    }
+  }
+  return uci::uciToMove(board, uci);
+}
+
 std::tuple<std::uint8_t, std::int16_t, int>
 count_unseen_moves(Board &board,
                    std::vector<std::pair<std::string, int>> &result,
@@ -151,13 +168,14 @@ count_unseen_moves(Board &board,
   for (const auto &m : moves) {
     if (unscored_checked >= unscored_total)
       break;
-    auto it = std::find_if(result.begin(), result.end(), [&m](const auto &p) {
-      return p.first == uci::moveToUci(m);
-    });
+    auto it =
+        std::find_if(result.begin(), result.end(), [&board, &m](const auto &p) {
+          return cdbuci_to_move(board, p.first) == m;
+        });
 
     if (it == result.end()) {
       board.makeMove<true>(m);
-      auto r = cdbdirect_get(handle, board.getFen(false));
+      auto r = cdbdirect_get(handle, board.getXfen(false));
       if (r.back().second != -2) {
         if (std::get<0>(count_unseen) == 0) {
           std::get<1>(count_unseen) = result.front().second;
@@ -190,7 +208,7 @@ search_result_t softmax(Board &board, int depth, double base, bool deriv,
   // probe DB
   stats.gets++;
   std::vector<std::pair<std::string, int>> result =
-      cdbdirect_get(handle, board.getFen(false));
+      cdbdirect_get(handle, board.getXfen(false));
   size_t n_elements = result.size();
   int ply = result[n_elements - 1].second;
 
@@ -236,7 +254,7 @@ search_result_t softmax(Board &board, int depth, double base, bool deriv,
       if (depth == 0) {
         softmaxes.emplace_back(std::make_pair(pair.first, double(pair.second)));
       } else {
-        Move m = uci::uciToMove(board, pair.first);
+        Move m = cdbuci_to_move(board, pair.first);
         board.makeMove<true>(m);
         search_result_t moveresult =
             softmax(board, depth - 1, base, false, fen_map, stats, alpha,
@@ -288,7 +306,7 @@ search_result_t softmax(Board &board, int depth, double base, bool deriv,
       }
 
       if (depth > 0) {
-        Move m = uci::uciToMove(board, pair.first);
+        Move m = cdbuci_to_move(board, pair.first);
         board.makeMove<true>(m);
         softmax(board, depth - 1, -base * deriv, true, fen_map, stats, alpha,
                 handle, showTree, fens_with_unseen);
@@ -325,7 +343,7 @@ search_result_t cdbsoftmax(Board &board, double base, size_t budget,
   stats.gets++;
   budget--;
   std::vector<std::pair<std::string, int>> result =
-      cdbdirect_get(handle, board.getFen(false));
+      cdbdirect_get(handle, board.getXfen(false));
   size_t n_elements = result.size();
   ply = result[n_elements - 1].second;
 
@@ -401,14 +419,15 @@ search_result_t cdbsoftmax(Board &board, double base, size_t budget,
 
       if (follow) {
 
-        Move m = uci::uciToMove(board, pair.first);
+        Move m = cdbuci_to_move(board, pair.first);
         board.makeMove<true>(m);
         // needs proper game ply.
-        std::string fen = board.getFen();
+        std::string fen = board.getXfen();
+        bool chess960 = board.chess960();
 
-        auto f = [pair, fen, base, deriv, next_budget, &fen_map, &stats, &alpha,
-                  &handle, &showTree, &fens_with_unseen]() {
-          Board board(fen);
+        auto f = [pair, fen, chess960, base, deriv, next_budget, &fen_map,
+                  &stats, &alpha, &handle, &showTree, &fens_with_unseen]() {
+          Board board(fen, chess960);
           search_result_t moveresult =
               cdbsoftmax(board, -base * deriv, next_budget, fen_map, stats,
                          alpha, handle, showTree, fens_with_unseen);
@@ -515,9 +534,11 @@ int main(int argc, char const *argv[]) {
     inputFens.push_back(fen);
   }
 
+  bool chess960 = find_argument(args, pos, "--chess960", true);
+
   // ensure without move counters
   for (size_t i = 0; i < inputFens.size(); ++i)
-    inputFens[i] = Board(inputFens[i]).getFen(false);
+    inputFens[i] = Board(inputFens[i], chess960).getXfen(false);
 
   // (initial) depth for searches
   int depth = 0;
@@ -541,8 +562,9 @@ int main(int argc, char const *argv[]) {
   bool uncover = find_argument(args, pos, "--findUnseenEdges", true);
   unseen_map_t *fens_with_unseen = uncover ? new unseen_map_t : NULL;
 
-  std::cout << "Opening DB" << std::endl;
   std::uintptr_t handle = cdbdirect_initialize(CHESSDB_PATH);
+  std::uint64_t db_size = cdbdirect_size(handle);
+  std::cout << "DB count: " << db_size << std::endl;
 
   Stats stats;
 
@@ -554,14 +576,14 @@ int main(int argc, char const *argv[]) {
 
   for (std::string &fen : inputFens) {
     if (allmoves) {
-      Board board(fen);
+      Board board(fen, chess960);
       std::vector<std::pair<std::string, int>> result =
           cdbdirect_get(handle, fen);
       for (auto &[move, score] : result) {
         if (move != "a0a0") {
-          Move m = uci::uciToMove(board, move);
+          Move m = cdbuci_to_move(board, move);
           board.makeMove<true>(m);
-          fens.push_back(std::make_pair(board.getFen(false), move));
+          fens.push_back(std::make_pair(board.getXfen(false), move));
           board.unmakeMove(m);
         }
       }
@@ -575,7 +597,7 @@ int main(int argc, char const *argv[]) {
   for (auto &[fen, move] : fens) {
     std::cout << "Search fen:" << std::setw(70) << fen << " after move "
               << std::setw(5) << move << std::flush;
-    Board board(fen);
+    Board board(fen, chess960);
     stats.clear();
     double base = -1.0;
     bool deriv = true;
@@ -618,7 +640,7 @@ int main(int argc, char const *argv[]) {
   assert(ufile.is_open());
 
   for (auto &[pbfen, deriv] : unknown_fens)
-    ufile << std::setw(70) << Board::Compact::decode(pbfen).getFen(false)
+    ufile << std::setw(70) << Board::Compact::decode(pbfen).getXfen(false)
           << " : " << std::scientific << std::setw(12) << std::setprecision(2)
           << deriv << std::endl;
 
@@ -629,7 +651,7 @@ int main(int argc, char const *argv[]) {
     assert(ufile.is_open());
     for (const auto &pair : *fens_with_unseen) {
       auto board = Board::Compact::decode(pair.first);
-      std::string fen = board.getFen(false);
+      std::string fen = board.getXfen(false);
       std::stringstream ss;
       ss << fen
          << " c0 \"unseen moves: " << static_cast<int>(std::get<0>(pair.second))

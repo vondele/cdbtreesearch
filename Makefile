@@ -1,13 +1,13 @@
 TERARKDBROOT = /home/vondele/chess/noob/terarkdb
 CDBDIRECTROOT = /home/vondele/chess/vondele/cdbdirect
-CHESSDB_PATH = /mnt/ssd/chess-20240814/data
+CHESSDB_PATH = /mnt/ssd/chess-20251115/data
 
 LDFLAGS = -L$(TERARKDBROOT)/output/lib -L$(CDBDIRECTROOT)
 LIBS = -lcdbdirect -lterarkdb -lterark-zip-r -lboost_fiber -lboost_context -ltcmalloc -pthread -lgcc -lrt -ldl -ltbb -laio -lgomp -lsnappy -llz4 -lz -lbz2
 
 all: cdbtreesearch cdbtreesearchnosoft
 
-CXXFLAGS = -std=c++20 -O3 -g -march=native -fno-omit-frame-pointer -fno-inline
+CXXFLAGS = -std=c++20 -O3 -march=native -fomit-frame-pointer -finline -flto=auto
 CXXFLAGS += -DCHESSDB_PATH=\"$(CHESSDB_PATH)\"
 
 cdbtreesearchnosoft: main.cpp
