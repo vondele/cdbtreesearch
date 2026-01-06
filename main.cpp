@@ -87,6 +87,23 @@ search_result_t gameOver(Board &board, int depth) {
   return std::make_pair(std::numeric_limits<int>::min(), -1);
 }
 
+// for chess960 uci::uciToMove only accepts KxR castling notation
+Move cdbuci_to_move(const Board &board, std::string_view uci) {
+  if (board.chess960() &&
+      (uci == "e1g1" || uci == "e1c1" || uci == "e8g8" || uci == "e8c8")) {
+    auto source = Square(uci.substr(0, 2));
+    auto target = Square(uci.substr(2, 2));
+    auto pt = board.at(source).type();
+
+    if (pt == PieceType::KING && board.at(target).type() == PieceType::NONE) {
+      target =
+          Square(target > source ? File::FILE_H : File::FILE_A, source.rank());
+      return Move::make<Move::CASTLING>(source, target);
+    }
+  }
+  return uci::uciToMove(board, uci);
+}
+
 search_result_t pvsearch(Board &board, int ply, Stats &stats,
                          const std::uintptr_t handle) {
 
@@ -102,7 +119,7 @@ search_result_t pvsearch(Board &board, int ply, Stats &stats,
   // probe DB
   stats.gets++;
   std::vector<std::pair<std::string, int>> result =
-      cdbdirect_get(handle, board.getFen(false));
+      cdbdirect_get(handle, board.getXfen(false));
   size_t n_elements = result.size();
   int rply = result[n_elements - 1].second;
 
@@ -115,7 +132,7 @@ search_result_t pvsearch(Board &board, int ply, Stats &stats,
             << result[0].first << " score " << std::setw(6)
             << (ply % 2 == 0 ? 1 : -1) * result[0].second << std::endl;
 
-  Move m = uci::uciToMove(board, result[0].first);
+  Move m = cdbuci_to_move(board, result[0].first);
   board.makeMove<true>(m);
   search_result_t sr = pvsearch(board, ply + 1, stats, handle);
   if (sr.second <= 0)
@@ -135,7 +152,7 @@ search_result_t minimax(Board &board, int depth, Stats &stats,
   // probe DB
   stats.gets++;
   std::vector<std::pair<std::string, int>> result =
-      cdbdirect_get(handle, board.getFen(false));
+      cdbdirect_get(handle, board.getXfen(false));
   size_t n_elements = result.size();
   int ply = result[n_elements - 1].second;
 
@@ -152,7 +169,7 @@ search_result_t minimax(Board &board, int depth, Stats &stats,
   for (auto &pair : result)
     if (pair.first != "a0a0") {
 
-      Move m = uci::uciToMove(board, pair.first);
+      Move m = cdbuci_to_move(board, pair.first);
       board.makeMove<true>(m);
       search_result_t moveresult = minimax(board, depth - 1, stats, handle);
       board.unmakeMove(m);
@@ -186,7 +203,7 @@ search_result_t alphabeta(Board &board, int depth, Stats &stats,
   // probe DB
   stats.gets++;
   std::vector<std::pair<std::string, int>> result =
-      cdbdirect_get(handle, board.getFen(false));
+      cdbdirect_get(handle, board.getXfen(false));
   size_t n_elements = result.size();
   int ply = result[n_elements - 1].second;
 
@@ -213,7 +230,7 @@ search_result_t alphabeta(Board &board, int depth, Stats &stats,
       if (pair.second > beta + margin * (depth + 1)) {
         moveresult = std::make_pair(-pair.second, depth);
       } else {
-        Move m = uci::uciToMove(board, pair.first);
+        Move m = cdbuci_to_move(board, pair.first);
         board.makeMove<true>(m);
         moveresult =
             alphabeta(board, depth - 1, stats, handle, -beta, -alpha, margin);
@@ -253,6 +270,8 @@ int main(int argc, char const *argv[]) {
   if (fen == "startpos")
     fen = constants::STARTPOS;
 
+  bool chess960 = find_argument(args, pos, "--chess960", true);
+
   // (initial) depth for searches
   int depth = 0;
   if (find_argument(args, pos, "--depth"))
@@ -271,13 +290,14 @@ int main(int argc, char const *argv[]) {
   bool do_pvsearch = find_argument(args, pos, "--pvsearch", true);
   bool allmoves = find_argument(args, pos, "--moves", true);
 
-  std::cout << "Search fen: " << fen << std::endl;
+  Board board(fen, chess960);
+
+  std::cout << "Search fen: " << board.getXfen(false) << std::endl;
   std::cout << "     depth: " << depth << std::endl;
 
-  Board board(fen);
-
-  std::cout << "Opening DB" << std::endl;
   std::uintptr_t handle = cdbdirect_initialize(CHESSDB_PATH);
+  std::uint64_t db_size = cdbdirect_size(handle);
+  std::cout << "DB count: " << db_size << std::endl;
 
   Stats stats;
   if (do_pvsearch) {
@@ -356,15 +376,15 @@ int main(int argc, char const *argv[]) {
     };
 
     if (allmoves) {
-      Board board(fen);
+      Board board(fen, chess960);
       std::vector<std::pair<std::string, int>> result =
-          cdbdirect_get(handle, board.getFen(false));
+          cdbdirect_get(handle, board.getXfen(false));
       for (auto &pair : result) {
         if (pair.first != "a0a0") {
-          Move m = uci::uciToMove(board, pair.first);
+          Move m = cdbuci_to_move(board, pair.first);
           board.makeMove<true>(m);
           std::cout << std::endl
-                    << "Analyzing " << uci::moveToUci(m) << std::endl;
+                    << "Analyzing " << uci::moveToUci(m, chess960) << std::endl;
           anaboard(board);
           board.unmakeMove(m);
         }
